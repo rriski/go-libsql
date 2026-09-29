@@ -15,6 +15,59 @@ package libsql
 #cgo darwin LDFLAGS: -framework CoreFoundation
 #include <libsql.h>
 #include <stdlib.h>
+
+typedef struct sqlite3 sqlite3;
+void sqlite3_interrupt(sqlite3 *db);
+void sqlite3_progress_handler(sqlite3 *db, int ops, int (*handler)(void *), void *arg);
+int sqlite3_auto_extension(void (*entry)(void));
+
+static __thread sqlite3 *go_libsql_opened_db;
+
+static int go_libsql_record_opened_db(sqlite3 *db, char **err, const void *api) {
+	go_libsql_opened_db = db;
+	return 0;
+}
+
+static int go_libsql_register_open_hook(const char **out_err_msg) {
+	libsql_database_t db = NULL;
+	int status = libsql_open_file(":memory:", &db, out_err_msg);
+	if (status != 0) {
+		return status;
+	}
+	libsql_close(db);
+	return sqlite3_auto_extension((void (*)(void))go_libsql_record_opened_db);
+}
+
+static int go_libsql_cancelled(void *flag) {
+	return __atomic_load_n((int *)flag, __ATOMIC_ACQUIRE);
+}
+
+static int go_libsql_connect(libsql_database_t db, libsql_connection_t *out_conn, sqlite3 **out_db, int *cancelled, const char **out_err_msg) {
+	go_libsql_opened_db = NULL;
+	int status = libsql_connect(db, out_conn, out_err_msg);
+	*out_db = go_libsql_opened_db;
+	go_libsql_opened_db = NULL;
+	if (status == 0 && *out_db != NULL) {
+		sqlite3_progress_handler(*out_db, 1000, go_libsql_cancelled, cancelled);
+	}
+	return status;
+}
+
+static void go_libsql_disconnect(libsql_connection_t conn, sqlite3 *db) {
+	if (db != NULL) {
+		sqlite3_progress_handler(db, 0, NULL, NULL);
+	}
+	libsql_disconnect(conn);
+}
+
+static void go_libsql_cancel(sqlite3 *db, int *cancelled) {
+	__atomic_store_n(cancelled, 1, __ATOMIC_RELEASE);
+	sqlite3_interrupt(db);
+}
+
+static void go_libsql_reset_cancel(int *cancelled) {
+	__atomic_store_n(cancelled, 0, __ATOMIC_RELEASE);
+}
 */
 import "C"
 
@@ -28,6 +81,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -313,11 +367,7 @@ func (c *Connector) Close() error {
 }
 
 func (c *Connector) Connect(ctx context.Context) (sqldriver.Conn, error) {
-	nativeConnPtr, err := libsqlConnect(c.nativeDbPtr)
-	if err != nil {
-		return nil, err
-	}
-	return &conn{nativePtr: nativeConnPtr}, nil
+	return libsqlConnect(c.nativeDbPtr)
 }
 
 func (c *Connector) Driver() sqldriver.Driver {
@@ -423,18 +473,56 @@ func libsqlOpenWithSync(dbPath, primaryUrl, authToken string, readYourWrites boo
 	return db, nil
 }
 
-func libsqlConnect(db C.libsql_database_t) (C.libsql_connection_t, error) {
-	var conn C.libsql_connection_t
+var registerOpenHook = sync.OnceValue(func() error {
 	var errMsg *C.char
-	statusCode := C.libsql_connect(db, &conn, &errMsg)
+	if statusCode := C.go_libsql_register_open_hook(&errMsg); statusCode != 0 {
+		return libsqlError("failed to register connection hook", statusCode, errMsg)
+	}
+	return nil
+})
+
+func libsqlConnect(db C.libsql_database_t) (*conn, error) {
+	if err := registerOpenHook(); err != nil {
+		return nil, err
+	}
+	c := &conn{cancelled: (*C.int)(C.calloc(1, C.sizeof_int))}
+	var errMsg *C.char
+	statusCode := C.go_libsql_connect(db, &c.nativePtr, &c.db, c.cancelled, &errMsg)
 	if statusCode != 0 {
+		C.free(unsafe.Pointer(c.cancelled))
 		return nil, libsqlError("failed to connect to database", statusCode, errMsg)
 	}
-	return conn, nil
+	return c, nil
 }
 
 type conn struct {
 	nativePtr C.libsql_connection_t
+	db        *C.sqlite3
+	cancelled *C.int
+}
+
+func (c *conn) interruptOnDone(ctx context.Context) (stop func()) {
+	if c.db == nil || ctx.Done() == nil {
+		return func() {}
+	}
+	interrupted := make(chan struct{})
+	stopInterrupt := context.AfterFunc(ctx, func() {
+		C.go_libsql_cancel(c.db, c.cancelled)
+		close(interrupted)
+	})
+	return func() {
+		if !stopInterrupt() {
+			<-interrupted
+			C.go_libsql_reset_cancel(c.cancelled)
+		}
+	}
+}
+
+func contextError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); err != nil && ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }
 
 func (c *conn) Prepare(query string) (sqldriver.Stmt, error) {
@@ -446,7 +534,8 @@ func (c *conn) Begin() (sqldriver.Tx, error) {
 }
 
 func (c *conn) Close() error {
-	C.libsql_disconnect(c.nativePtr)
+	C.go_libsql_disconnect(c.nativePtr, c.db)
+	C.free(unsafe.Pointer(c.cancelled))
 	return nil
 }
 
@@ -658,9 +747,11 @@ func (r execResult) RowsAffected() (int64, error) {
 }
 
 func (c *conn) ExecContext(ctx context.Context, query string, args []sqldriver.NamedValue) (sqldriver.Result, error) {
+	stop := c.interruptOnDone(ctx)
 	rows, err := c.execute(query, args, true)
+	stop()
 	if err != nil {
-		return nil, err
+		return nil, contextError(ctx, err)
 	}
 	id := int64(C.libsql_last_insert_rowid(c.nativePtr))
 	changes := int64(C.libsql_changes(c.nativePtr))
@@ -735,7 +826,7 @@ const (
 
 func newRows(nativePtr C.libsql_rows_t) (*rows, error) {
 	if nativePtr == nil {
-		return &rows{nil, nil}, nil
+		return &rows{}, nil
 	}
 	columnCount := int(C.libsql_column_count(nativePtr))
 	columns := make([]string, columnCount)
@@ -749,12 +840,14 @@ func newRows(nativePtr C.libsql_rows_t) (*rows, error) {
 		columns[i] = C.GoString(ptr)
 		C.libsql_free_string(ptr)
 	}
-	return &rows{nativePtr, columns}, nil
+	return &rows{nativePtr: nativePtr, columnNames: columns}, nil
 }
 
 type rows struct {
 	nativePtr   C.libsql_rows_t
 	columnNames []string
+	ctx         context.Context
+	stop        func()
 }
 
 func (r *rows) Columns() []string {
@@ -765,6 +858,10 @@ func (r *rows) Close() error {
 	if r.nativePtr != nil {
 		C.libsql_free_rows(r.nativePtr)
 		r.nativePtr = nil
+	}
+	if r.stop != nil {
+		r.stop()
+		r.stop = nil
 	}
 	return nil
 }
@@ -777,7 +874,7 @@ func (r *rows) Next(dest []sqldriver.Value) error {
 	var errMsg *C.char
 	statusCode := C.libsql_next_row(r.nativePtr, &row, &errMsg)
 	if statusCode != 0 {
-		return libsqlError("failed to get next row", statusCode, errMsg)
+		return contextError(r.ctx, libsqlError("failed to get next row", statusCode, errMsg))
 	}
 	if row == nil {
 		r.Close()
@@ -859,9 +956,21 @@ Outerloop:
 }
 
 func (c *conn) QueryContext(ctx context.Context, query string, args []sqldriver.NamedValue) (sqldriver.Rows, error) {
+	stop := c.interruptOnDone(ctx)
 	rowsNativePtr, err := c.execute(query, args, false)
 	if err != nil {
-		return nil, err
+		stop()
+		return nil, contextError(ctx, err)
 	}
-	return newRows(rowsNativePtr)
+	result, err := newRows(rowsNativePtr)
+	if err != nil {
+		stop()
+		return nil, contextError(ctx, err)
+	}
+	result.ctx = ctx
+	result.stop = stop
+	if result.nativePtr == nil {
+		result.Close()
+	}
+	return result, nil
 }
