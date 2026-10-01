@@ -57,6 +57,7 @@ func TestTextConversion(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 	for _, value := range textCases(t) {
+		value := value
 		t.Run(fmt.Sprintf("given %q, when read, then its type and value match", value), func(t *testing.T) {
 			t.Parallel()
 			want := referenceText(value)
