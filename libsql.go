@@ -932,6 +932,10 @@ Outerloop:
 			}
 			str := C.GoString(ptr)
 			C.libsql_free_string(ptr)
+			if !hasDatePrefix(str) {
+				dest[i] = str
+				continue Outerloop
+			}
 			for _, format := range []string{
 				time.RFC3339Nano,
 				"2006-01-02 15:04:05.999999999-07:00",
@@ -973,4 +977,8 @@ func (c *conn) QueryContext(ctx context.Context, query string, args []sqldriver.
 		result.Close()
 	}
 	return result, nil
+}
+
+func hasDatePrefix(value string) bool {
+	return len(value) >= 10 && value[4] == '-' && value[7] == '-'
 }
