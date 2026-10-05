@@ -1,6 +1,9 @@
 name: Build libsql libraries
 
 on:
+  push:
+    branches: [atenos/libsql-0.9.25-single-close]
+    paths-ignore: ['lib/**']
   workflow_dispatch:
     inputs:
       libsql_tag:
@@ -14,7 +17,7 @@ jobs:
     steps:
       - name: Set libsql tag
         run: |
-          TAG=${{ github.event.inputs.libsql_tag }}
+          TAG=${{ github.event.inputs.libsql_tag || 'libsql-0.9.25' }}
           echo "Using tag: $TAG"
           echo "LIBSQL_TAG=$TAG" >> $GITHUB_ENV
 
@@ -55,7 +58,7 @@ jobs:
       - name: Set libsql tag
         id: set-tag
         run: |
-          TAG=${{ github.event.inputs.libsql_tag }}
+          TAG=${{ github.event.inputs.libsql_tag || 'libsql-0.9.25' }}
           echo "Using tag: $TAG"
           echo "LIBSQL_TAG=$TAG" >> $GITHUB_ENV
 
@@ -108,7 +111,7 @@ jobs:
       - name: Set libsql tag
         id: set-tag
         run: |
-          TAG=${{ github.event.inputs.libsql_tag }}
+          TAG=${{ github.event.inputs.libsql_tag || 'libsql-0.9.25' }}
           echo "Using tag: $TAG"
           echo "LIBSQL_TAG=$TAG" >> $GITHUB_ENV
 
@@ -301,7 +304,7 @@ jobs:
       - name: Set libsql tag
         id: set-tag
         run: |
-          TAG=${{ github.event.inputs.libsql_tag }}
+          TAG=${{ github.event.inputs.libsql_tag || 'libsql-0.9.25' }}
           echo "LIBSQL_TAG=$TAG" >> $GITHUB_ENV
 
       - name: Commit libraries
