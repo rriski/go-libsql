@@ -184,7 +184,7 @@ jobs:
         run: |
           echo "Building example/local/main.go for Linux AMD64..."
           cd example/local
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -v
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -mod=mod -v
           echo "Linux AMD64 build successful!"
 
   verify-linux-arm64:
@@ -227,7 +227,7 @@ jobs:
         run: |
           echo "Building example/local/main.go for Linux ARM64..."
           cd example/local
-          CC=aarch64-linux-gnu-gcc GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -v
+          CC=aarch64-linux-gnu-gcc GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -mod=mod -v
           echo "Linux ARM64 build successful!"
 
   verify-darwin-arm64:
@@ -265,7 +265,7 @@ jobs:
         run: |
           echo "Building example/local/main.go for Darwin ARM64..."
           cd example/local
-          GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -v
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -mod=mod -v
           echo "Darwin ARM64 build successful!"
 
   update-repository:
