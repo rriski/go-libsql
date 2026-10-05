@@ -66,6 +66,9 @@ jobs:
           ref: ${{ env.LIBSQL_TAG }}
           path: libsql
 
+      - name: Apply libsql patches
+        run: git -C libsql apply "$GITHUB_WORKSPACE/go-libsql/patches/libsql-double-disconnect.patch"
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -115,6 +118,9 @@ jobs:
           repository: tursodatabase/libsql
           ref: ${{ env.LIBSQL_TAG }}
           path: libsql
+
+      - name: Apply libsql patches
+        run: git -C libsql apply "$GITHUB_WORKSPACE/go-libsql/patches/libsql-double-disconnect.patch"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -263,6 +269,8 @@ jobs:
     needs: [verify-linux-amd64, verify-linux-arm64, verify-darwin-arm64]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
     steps:
       - name: Checkout go-libsql
         uses: actions/checkout@v4
@@ -296,20 +304,10 @@ jobs:
           TAG=${{ github.event.inputs.libsql_tag }}
           echo "LIBSQL_TAG=$TAG" >> $GITHUB_ENV
 
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v5
-        with:
-          commit-message: "Update libsql libraries to `${{ env.LIBSQL_TAG }}`"
-          title: "Update libsql libraries to `${{ env.LIBSQL_TAG }}`"
-          body: |
-            This PR updates the libsql static libraries to version `${{ env.LIBSQL_TAG }}`.
-            
-            Libraries updated:
-            - `linux_amd64/libsql_experimental.a`
-            - `linux_arm64/libsql_experimental.a`
-            - `darwin_arm64/libsql_experimental.a`
-            - `include/libsql.h` (if changed)
-            
-            This update was generated automatically by the [update-libsql workflow](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).
-          branch: update-${{ env.LIBSQL_TAG }}
-          delete-branch: true
+      - name: Commit libraries
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib
+          git commit -m "Rebuild libsql libraries at \`${LIBSQL_TAG}\` with the single-close patch" -m "Built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+          git push origin "HEAD:${GITHUB_REF_NAME}"
